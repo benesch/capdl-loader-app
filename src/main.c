@@ -68,6 +68,11 @@ static seL4_CPtr capdl_to_sel4_irq[CONFIG_CAPDL_LOADER_MAX_OBJECTS];
 static seL4_CPtr untyped_cptrs[CONFIG_MAX_NUM_BOOTINFO_UNTYPED_CAPS];
 #endif
 
+/* START SCHEDUL4 */
+static seL4_CPtr threads[CONFIG_CAPDL_LOADER_MAX_OBJECTS];
+seL4_CPtr schedule_slot;
+static void schedule();
+/* END SCHEDUL4 */
 
 static seL4_CPtr free_slot_start, free_slot_end;
 
@@ -876,6 +881,16 @@ create_objects(const CDL_Model *spec, seL4_BootInfo *bootinfo)
     // Update the free slot to go past all the objects we just made.
     free_slot_start += free_slot_index;
 
+    /* START SCHEDUL4
+    /* XXX Integrate this into CAmkES. */
+    seL4_CPtr free_slot = schedule_slot = free_slot_start++;
+    seL4_CPtr untyped_cptr = untyped_cptrs[ut_index]; /* Hope we have enough space. */
+    seL4_ArchObjectType obj_type = (seL4_ArchObjectType) CDL_Endpoint;
+
+    int err = retype_untyped(free_slot, untyped_cptr, obj_type, 0);
+    seL4_AssertSuccess(err);
+    /* END SCHEDUL4 */
+
     if (obj_id_index != spec->num) {
         /* We didn't iterate through all the objects. */
         die("Ran out of untyped memory while creating objects.");
@@ -1481,8 +1496,9 @@ init_cnode_slot(const CDL_Model *spec, init_cnode_mode mode, CDL_ObjID cnode_id,
 static void
 init_cnode(const CDL_Model *spec, init_cnode_mode mode, CDL_ObjID cnode)
 {
+    unsigned int slot_index;
     CDL_Object *cdl_cnode = get_spec_object(spec, cnode);
-    for (unsigned int slot_index = 0; slot_index < CDL_Obj_NumSlots(cdl_cnode); slot_index++) {
+    for (slot_index = 0; slot_index < CDL_Obj_NumSlots(cdl_cnode); slot_index++) {
         if (CDL_Obj_GetSlot(cdl_cnode, slot_index)->cap.type == CDL_IRQHandlerCap) {
             CDL_IRQ UNUSED irq = CDL_Obj_GetSlot(cdl_cnode, slot_index)->cap.irq;
             debug_printf("  Populating slot %d with cap to IRQ %d, name %s...\n",
@@ -1495,6 +1511,31 @@ init_cnode(const CDL_Model *spec, init_cnode_mode mode, CDL_ObjID cnode)
         }
         init_cnode_slot(spec, mode, cnode, CDL_Obj_GetSlot(cdl_cnode, slot_index));
     }
+
+    /* START SCHEDUL4
+    /* XXX Hack in support for our scheduling synchronous endpoint. */
+
+    if (mode == COPY) {
+        seL4_CPtr src_root = seL4_CapInitThreadCNode;
+        int src_index = schedule_slot; /* XXX Ugh. */
+        uint8_t src_depth = 32;
+
+        seL4_CPtr dest_root = dup_caps(cnode);
+        int dest_index = ++slot_index;
+        uint8_t dest_depth = CDL_Obj_SizeBits(get_spec_object(spec, cnode));
+
+        seL4_CapRights target_cap_rights = (0 | seL4_CanRead | seL4_CanWrite);
+        seL4_CapData_t target_cap_data = {{0}};
+
+        /* XXX This assumes each component only has one CNode. Probably a bad
+         * assumption. But also we always copy our scheduler endpoint into
+           slot 22, so DGAF? */
+        debug_printf(" Populating scheduler cap in slot %d\n", dest_index);
+        int error = seL4_CNode_Mint(dest_root, dest_index, dest_depth,
+                                    src_root, src_index, src_depth, target_cap_rights, target_cap_data);
+        seL4_AssertSuccess(error);
+    }
+    /* END SCHEDUL4 */
 }
 
 static void
@@ -1520,11 +1561,14 @@ init_cspace(const CDL_Model *spec)
 static void
 start_threads(const CDL_Model *spec)
 {
+    unsigned thread_id = 0;
+
     debug_printf("Starting threads...\n");
     for (CDL_ObjID obj_id = 0; obj_id < spec->num; obj_id++) {
         if (spec->objects[obj_id].type == CDL_TCB) {
             debug_printf(" Starting %s...\n", CDL_Obj_Name(&spec->objects[obj_id]));
             seL4_CPtr tcb = orig_caps(obj_id);
+            threads[thread_id++] = tcb;
             int error = seL4_TCB_Resume(tcb);
             seL4_AssertSuccess(error);
         }
@@ -1574,6 +1618,24 @@ main(void)
     debug_printf("We used %d CSlots (%.2LF%% of our CNode)\n", get_free_slot(),
         (long double)get_free_slot() /
         (long double)(1U << CONFIG_ROOT_CNODE_SIZE_BITS) * 100);
-    debug_printf(ANSI_GREEN "Done; suspending..." ANSI_RESET "\n");
-    seL4_TCB_Suspend(seL4_CapInitThreadTCB);
+
+    schedule(); /* SCHEDUL4 */
 }
+
+/* START SCHEDUL4 */
+static void
+schedule(void)
+{
+    int num_threads;
+    for (num_threads = 0; threads[num_threads]; num_threads++)
+        ;
+
+    debug_printf("Discovered %d threads to manage.\n", num_threads);
+
+    int tix = 0;
+    while (true) {
+        int out = seL4_TCB_Activate(threads[tix]);
+        tix = (tix + 1) % num_threads;
+    }
+}
+/* END SCHEDUL4 */
