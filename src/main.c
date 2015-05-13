@@ -603,8 +603,6 @@ parse_bootinfo(seL4_BootInfo *bootinfo)
     }
 #endif
 
-    debug_printf("Loader is running in domain %d\n", bootinfo->initThreadDomain);
-
 #if CONFIG_CAPDL_LOADER_PRINT_DEVICE_INFO
 #ifdef CONFIG_KERNEL_STABLE
     int num_device_untyped = bootinfo->deviceUntyped.end - bootinfo->deviceUntyped.start;
@@ -1111,11 +1109,6 @@ configure_thread(const CDL_Model *spec, CDL_ObjID tcb)
     int error = seL4_TCB_WriteRegisters(sel4_tcb, false, 0,
                                         sizeof(seL4_UserContext) / sizeof(seL4_Word),
                                         &global_user_context);
-    seL4_AssertSuccess(error);
-
-    uint32_t domain = CDL_TCB_Domain(cdl_tcb);
-    debug_printf("  Assigning thread to domain %u...\n", domain);
-    error = seL4_DomainSet_Set(seL4_CapDomain, domain, sel4_tcb);
     seL4_AssertSuccess(error);
 }
 
