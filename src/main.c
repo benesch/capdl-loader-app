@@ -68,7 +68,11 @@ static seL4_CPtr capdl_to_sel4_irq[CONFIG_CAPDL_LOADER_MAX_OBJECTS];
 static seL4_CPtr untyped_cptrs[CONFIG_MAX_NUM_BOOTINFO_UNTYPED_CAPS];
 #endif
 
+static seL4_CPtr threads[CONFIG_CAPDL_LOADER_MAX_OBJECTS];
+seL4_CPtr schedule_slot;
+static void schedule();
 
+static seL4_CPtr runqueue_cptr;
 static seL4_CPtr free_slot_start, free_slot_end;
 
 // Hack for seL4_TCB_WriteRegisters because we can't take the address of local variables.
@@ -874,6 +878,13 @@ create_objects(const CDL_Model *spec, seL4_BootInfo *bootinfo)
     // Update the free slot to go past all the objects we just made.
     free_slot_start += free_slot_index;
 
+    runqueue_cptr = free_slot_start;
+    printf("Runqueue slot: %x\n", free_slot_start);
+    int err = retype_untyped(free_slot_start, untyped_cptrs[ut_index], seL4_RunqueueObject, 0);
+    seL4_AssertSuccess(err);
+
+    free_slot_start++;
+
     if (obj_id_index != spec->num) {
         /* We didn't iterate through all the objects. */
         die("Ran out of untyped memory while creating objects.");
@@ -970,7 +981,7 @@ init_tcb(const CDL_Model *spec, CDL_ObjID tcb)
     }
 
     seL4_Word ipcbuffer_addr = CDL_TCB_IPCBuffer_Addr(cdl_tcb);
-    uint8_t priority = CDL_TCB_Priority(cdl_tcb);
+    uint8_t priority = 0;
 
     seL4_CPtr sel4_tcb = orig_caps(tcb);
 
@@ -1513,11 +1524,14 @@ init_cspace(const CDL_Model *spec)
 static void
 start_threads(const CDL_Model *spec)
 {
+    unsigned thread_id = 0;
+
     debug_printf("Starting threads...\n");
     for (CDL_ObjID obj_id = 0; obj_id < spec->num; obj_id++) {
         if (spec->objects[obj_id].type == CDL_TCB) {
             debug_printf(" Starting %s...\n", CDL_Obj_Name(&spec->objects[obj_id]));
             seL4_CPtr tcb = orig_caps(obj_id);
+            threads[thread_id++] = tcb;
             int error = seL4_TCB_Resume(tcb);
             seL4_AssertSuccess(error);
         }
@@ -1568,5 +1582,22 @@ main(void)
         (long double)get_free_slot() /
         (long double)(1U << CONFIG_ROOT_CNODE_SIZE_BITS) * 100);
     debug_printf(ANSI_GREEN "Done; suspending..." ANSI_RESET "\n");
-    seL4_TCB_Suspend(seL4_CapInitThreadTCB);
+
+    schedule();
+}
+
+static void
+schedule(void)
+{
+    int i;
+    for (i = 0; threads[i]; i++) {
+        seL4_Runqueue_SetSlot(runqueue_cptr, threads[i], i);
+    }
+    seL4_Runqueue_SetSlot(runqueue_cptr, seL4_CapInitThreadTCB, i);
+
+    printf("Discovered %d threads to manage.\n", i);
+
+    while (true) {
+        seL4_ScheduleControl_StartRunqueue(seL4_CapRunqueue, runqueue_cptr);
+    }
 }
